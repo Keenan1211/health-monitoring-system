@@ -13,7 +13,7 @@ GPIO.setmode(GPIO.BCM)
 GPIO.setup(BUZZER_PIN, GPIO.OUT)
 
 # ============ Firebase Setup ============
-cred = credentials.Certificate("smart-health-monitoring-87119-firebase-adminsdk-y178i-048c478c74.json")
+cred = credentials.Certificate("smart-health-monitoring-87119-firebase-adminsdk-y178i-8f2138caa7.json")
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://smart-health-monitoring-87119-default-rtdb.asia-southeast1.firebasedatabase.app/'  # Replace with your URL
 })
