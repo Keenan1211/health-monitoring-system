@@ -1,5 +1,5 @@
 import time
-import max30102
+from max30102.max30102 import MAX30102
 import numpy as np
 import RPi.GPIO as GPIO
 import board
@@ -20,15 +20,15 @@ HEART_RATE_HIGH = 120
 SPO2_LOW = 95
 
 # Firebase config
-cred = credentials.Certificate("/home/asus/health-monitoring-system/smart-health-monitoring-87119-firebase-adminsdk-y178i-8f2138caa7.json")
+cred = credentials.Certificate("/home/asus/health-monitoring-system/smart-health-monitoring-87119-firebase-adminsdk-y178i-a44383a0ef.json")
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://smart-health-monitoring-87119-default-rtdb.asia-southeast1.firebasedatabase.app/'
 })
 
 # ---------- HARDWARE SETUP ----------
 
-# MAX30102
-m = max30102.MAX30102()
+# MAX30102 sensor
+m = MAX30102()
 
 # Temperature sensor (MLX90614)
 i2c = busio.I2C(board.SCL, board.SDA)
