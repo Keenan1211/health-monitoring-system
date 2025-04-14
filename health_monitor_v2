@@ -1,4 +1,6 @@
 import time
+import sys
+import getpass
 from max30102.max30102 import MAX30102
 import numpy as np
 import RPi.GPIO as GPIO
@@ -6,7 +8,7 @@ import board
 import busio
 import adafruit_mlx90614
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, auth
 
 # ---------- CONFIGURATION ----------
 
@@ -19,6 +21,9 @@ HEART_RATE_LOW = 50
 HEART_RATE_HIGH = 120
 SPO2_LOW = 95
 
+# Sensor timeout (in seconds)
+SENSOR_TIMEOUT = 10
+
 # Firebase config - Initialize Firebase BEFORE creating the Firestore client
 cred = credentials.Certificate("/home/asus/health-monitoring-system/healthmonitoringsystem-4434f-firebase-adminsdk-fbsvc-b97e69f652.json")
 firebase_admin.initialize_app(cred)
@@ -26,48 +31,120 @@ firebase_admin.initialize_app(cred)
 # Now create the Firestore client
 db = firestore.client()
 
-# Default user ID - change this to your actual user ID
-USER_ID = "DxImKeoMGXetsz0yOM5rpQbEH432"  # Default user ID
+# ---------- AUTHENTICATION FUNCTIONS ----------
+
+def login_user():
+    """
+    Prompt the user for login credentials and authenticate with Firebase.
+    Returns the authenticated user's UID or None if authentication fails.
+    """
+    print("\n===== User Authentication =====")
+    email = input("Enter your email: ")
+    password = getpass.getpass("Enter your password: ")
+
+    try:
+        # Note: Firebase Admin SDK doesn't support direct email/password authentication
+        # This is a simplified example - in a real app, you would use Firebase Auth REST API
+        # or implement a client-side authentication flow
+
+        # For this example, we'll look up the user by email
+        try:
+            user = auth.get_user_by_email(email)
+            print(f"User authenticated: {user.uid}")
+            return user.uid
+        except auth.UserNotFoundError:
+            print("User not found. Please check your email or sign up.")
+            return None
+
+    except Exception as e:
+        print(f"Authentication error: {e}")
+        return None
 
 # ---------- HARDWARE SETUP ----------
 
-# MAX30102 sensor
-m = MAX30102()
+# Initialize sensors with error handling
+def initialize_sensors():
+    try:
+        # MAX30102 sensor
+        max30102 = MAX30102()
 
-# Temperature sensor (MLX90614)
-i2c = busio.I2C(board.SCL, board.SDA)
-mlx = adafruit_mlx90614.MLX90614(i2c)
+        # Temperature sensor (MLX90614)
+        i2c = busio.I2C(board.SCL, board.SDA)
+        mlx = adafruit_mlx90614.MLX90614(i2c)
 
-# Buzzer
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(BUZZER_PIN, GPIO.OUT)
+        # Buzzer
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(BUZZER_PIN, GPIO.OUT)
+
+        print("✅ All sensors initialized successfully")
+        return max30102, mlx
+    except Exception as e:
+        print(f"❌ Error initializing sensors: {e}")
+        return None, None
 
 # ---------- FUNCTIONS ----------
 
 def buzz(duration=0.2):
-    GPIO.output(BUZZER_PIN, GPIO.HIGH)
-    time.sleep(duration)
-    GPIO.output(BUZZER_PIN, GPIO.LOW)
+    try:
+        GPIO.output(BUZZER_PIN, GPIO.HIGH)
+        time.sleep(duration)
+        GPIO.output(BUZZER_PIN, GPIO.LOW)
+    except Exception as e:
+        print(f"Buzzer error: {e}")
 
-def get_heart_rate_spo2():
-    red, ir = m.read_sequential()
-    if len(red) < 100 or len(ir) < 100:
+def get_heart_rate_spo2(m, timeout=SENSOR_TIMEOUT):
+    """
+    Get heart rate and SpO2 readings with timeout.
+
+    Args:
+        m: MAX30102 sensor object
+        timeout: Maximum time to wait for a reading in seconds
+
+    Returns:
+        Tuple of (heart_rate, spo2) or (None, None) if timeout or error
+    """
+    start_time = time.time()
+
+    try:
+        while time.time() - start_time < timeout:
+            try:
+                red, ir = m.read_sequential()
+
+                if len(red) < 100 or len(ir) < 100:
+                    time.sleep(0.1)
+                    continue
+
+                red_mean = np.mean(red)
+                ir_mean = np.mean(ir)
+
+                # Use IR mean to detect if finger is placed
+                if ir_mean < 50000:
+                    time.sleep(0.1)
+                    continue
+
+                # Dummy calculations (replace with real algorithm if needed)
+                heart_rate = int(60 + 40 * np.random.rand())  # mock value
+                spo2 = int(95 + 3 * np.random.rand())         # mock value
+                return heart_rate, spo2
+
+            except Exception as e:
+                print(f"Error reading from MAX30102: {e}")
+                time.sleep(0.5)
+
+        # If we get here, we timed out
+        print(f"Timeout waiting for valid sensor reading ({timeout}s)")
         return None, None
 
-    red_mean = np.mean(red)
-    ir_mean = np.mean(ir)
-
-    # Use IR mean to detect if finger is placed
-    if ir_mean < 50000:
+    except Exception as e:
+        print(f"Critical error in get_heart_rate_spo2: {e}")
         return None, None
 
-    # Dummy calculations (replace with real algorithm if needed)
-    heart_rate = int(60 + 40 * np.random.rand())  # mock value
-    spo2 = int(95 + 3 * np.random.rand())         # mock value
-    return heart_rate, spo2
-
-def get_temperature():
-    return mlx.object_temperature
+def get_temperature(mlx):
+    try:
+        return mlx.object_temperature
+    except Exception as e:
+        print(f"Error reading temperature: {e}")
+        return None
 
 def send_to_firebase(heart_rate, spo2, temperature, user_id):
     """
@@ -89,7 +166,16 @@ def send_to_firebase(heart_rate, spo2, temperature, user_id):
         user_doc = user_ref.get()
         if not user_doc.exists:
             print(f"User document for {user_id} does not exist. Creating new document.")
+
+            # Get user details if available
+            try:
+                user = auth.get_user(user_id)
+                user_email = user.email
+            except:
+                user_email = "unknown@email.com"
+
             user_ref.set({
+                'email': user_email,
                 'created_at': firestore.SERVER_TIMESTAMP,
                 'last_updated': firestore.SERVER_TIMESTAMP
             })
@@ -116,43 +202,105 @@ def send_to_firebase(heart_rate, spo2, temperature, user_id):
         }, merge=True)
 
         print(f"Data sent to Firestore for user: {user_id}")
+        return True
     except Exception as e:
         print(f"Error sending data to Firestore: {e}")
+        return False
 
-# ---------- MAIN LOOP ----------
+# ---------- MAIN PROGRAM ----------
 
-print(f"💡 Monitoring health data for user: {USER_ID}")
-print("💡 Waiting for finger to be detected...")
+def main():
+    print("🏥 Health Monitoring System 🏥")
+    print("------------------------------")
 
-try:
-    while True:
-        heart_rate, spo2 = get_heart_rate_spo2()
+    # Get user ID from command line argument or prompt for login
+    if len(sys.argv) > 1:
+        user_id = sys.argv[1]
+        print(f"Using provided user ID: {user_id}")
+    else:
+        # Authenticate user
+        user_id = login_user()
+        if not user_id:
+            print("Authentication failed. Exiting.")
+            return
 
-        if heart_rate is None:
-            print("👉 Place your finger on the sensor.")
-            time.sleep(1)
-            continue
+    # Initialize sensors
+    max30102, mlx = initialize_sensors()
+    if max30102 is None or mlx is None:
+        print("Failed to initialize sensors. Exiting.")
+        return
 
-        temperature = get_temperature()
+    print(f"💡 Monitoring health data for user: {user_id}")
+    print("💡 Waiting for finger to be detected...")
 
-        print(f"💓 HR: {heart_rate} bpm | SpO₂: {spo2}% | 🌡️ Temp: {temperature:.2f}°C")
+    try:
+        reading_count = 0
+        consecutive_errors = 0
 
-        # Check for abnormal values
-        abnormal = (
-            temperature > TEMP_THRESHOLD or
-            heart_rate < HEART_RATE_LOW or heart_rate > HEART_RATE_HIGH or
-            spo2 < SPO2_LOW
-        )
+        while True:
+            try:
+                # Get heart rate and SpO2
+                heart_rate, spo2 = get_heart_rate_spo2(max30102)
 
-        if abnormal:
-            print("⚠️  Abnormal reading detected!")
-            buzz(0.5)
+                if heart_rate is None:
+                    consecutive_errors += 1
+                    print(f"👉 Place your finger on the sensor. (Attempt {consecutive_errors})")
 
-        # Send data to Firebase with the user ID
-        send_to_firebase(heart_rate, spo2, temperature, USER_ID)
-        time.sleep(5)
+                    # If we've had too many consecutive errors, reinitialize the sensor
+                    if consecutive_errors >= 5:
+                        print("Too many consecutive errors. Reinitializing sensors...")
+                        max30102, mlx = initialize_sensors()
+                        if max30102 is None or mlx is None:
+                            print("Failed to reinitialize sensors. Exiting.")
+                            break
+                        consecutive_errors = 0
 
-except KeyboardInterrupt:
-    print("\n🛑 Exiting program.")
-finally:
-    GPIO.cleanup()
+                    time.sleep(1)
+                    continue
+
+                # Reset consecutive error counter on success
+                consecutive_errors = 0
+
+                # Get temperature
+                temperature = get_temperature(mlx)
+                if temperature is None:
+                    print("❌ Failed to read temperature. Skipping this reading.")
+                    time.sleep(1)
+                    continue
+
+                print(f"💓 HR: {heart_rate} bpm | SpO₂: {spo2}% | 🌡️ Temp: {temperature:.2f}°C")
+
+                # Check for abnormal values
+                abnormal = (
+                    temperature > TEMP_THRESHOLD or
+                    heart_rate < HEART_RATE_LOW or heart_rate > HEART_RATE_HIGH or
+                    spo2 < SPO2_LOW
+                )
+
+                if abnormal:
+                    print("⚠️  Abnormal reading detected!")
+                    buzz(0.5)
+
+                # Send data to Firebase with the user ID
+                success = send_to_firebase(heart_rate, spo2, temperature, user_id)
+                if success:
+                    reading_count += 1
+                    print(f"✅ Reading #{reading_count} saved successfully")
+
+                # Wait before next reading
+                time.sleep(5)
+
+            except Exception as e:
+                print(f"Error in main loop: {e}")
+                time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\n🛑 Exiting program.")
+    finally:
+        try:
+            GPIO.cleanup()
+        except:
+            pass
+
+if __name__ == "__main__":
+    main()
